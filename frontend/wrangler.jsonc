@@ -1,0 +1,18 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	// Static assets only, there is no Worker script. Deploy with `pnpm cf:deploy`.
+	"name": "testproject-frontend",
+	"compatibility_date": "2026-10-01",
+	// Login cookies only work when the site and the API share a domain, so the free
+	// *.workers.dev address is switched off and a custom domain is used instead.
+	"workers_dev": false,
+	"routes": [
+		// CHANGE THIS to your real address. The domain must already be added to your Cloudflare account.
+		{ "pattern": "app.example.com", "custom_domain": true }
+	],
+	"assets": {
+		"directory": "./build",
+		// Unknown paths get index.html, so client-side routes like /login work on refresh.
+		"not_found_handling": "single-page-application"
+	}
+}

@@ -1,0 +1,21 @@
+[Unit]
+Description=TestProject API (Spring Boot)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+User=app
+Group=app
+EnvironmentFile=/etc/testproject/api.env
+ExecStart=/usr/bin/java -jar /opt/testproject/app.jar
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
