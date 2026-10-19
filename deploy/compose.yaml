@@ -1,0 +1,56 @@
+# Production stack: Postgres + the backend image from GitHub's container registry.
+# Run it from this folder on the VPS:   sudo docker compose up -d
+#
+# All settings and secrets come from `.env` next to this file. On the server `.env` is a symlink to
+# /etc/testproject/api.env (see DEPLOY.md), so the secrets never live in git.
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in /etc/testproject/api.env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # Checks over TCP on purpose: while Postgres initialises for the first time it runs a temporary
+      # server that only listens on a socket, and a socket check would say "healthy" too early.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No `ports:` on purpose: only the api container can reach the database.
+
+  api:
+    image: ghcr.io/mrsolymi/testproject-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # 0.0.0.0 is only the address *inside* the container. The port is published on the host's
+      # loopback address below, so nothing outside the server can reach it directly.
+      SERVER_ADDRESS: 0.0.0.0
+      DB_URL: jdbc:postgresql://db:5432/app
+      DB_USER: app
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    logging: *logging
+
+volumes:
+  db-data:

@@ -1,3 +1,4 @@
-# Files that run on the Linux VPS must keep Unix line endings even when checked out on Windows.
+# Files that run on the Linux VPS or inside Docker must keep Unix line endings even when checked out on Windows.
 *.sh text eol=lf
 deploy/** text eol=lf
+Dockerfile text eol=lf
