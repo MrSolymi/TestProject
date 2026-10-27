@@ -5,7 +5,7 @@ This guide takes the app from your PC to the internet:
 - the **frontend** (the website) runs on Cloudflare, for free
 - the **backend** (the API and its database) runs on a small rented server (a VPS) that you control, inside Docker containers
 
-Both are deployed **straight from your GitHub repository**: GitHub builds the backend into a Docker image and the server just downloads it, and Cloudflare builds the website by itself whenever you push.
+Both are deployed **straight from your GitHub repository**: GitHub builds the backend into a Docker image and the server just downloads it, and Cloudflare builds the website by itself whenever you push. Optionally (step 14.2), GitHub can also tell the server to update itself after every successful build, so a `git push` is the only thing you ever do.
 
 Plan for about 1 to 2 hours the first time. Nothing here is hard, but there are many small steps, so go slowly and do the **Check** after each step before moving on.
 
@@ -82,7 +82,7 @@ Now watch GitHub build the image. Open your repository on github.com and click t
 1. **test**: runs the backend tests (2 to 4 minutes).
 2. **image**: builds the Docker image and publishes it to GitHub's container registry as `ghcr.io/mrsolymi/testproject-backend`, with two tags: `latest` and `sha-` followed by the first 7 characters of your commit.
 
-**Check:** both jobs show a green check mark. If one is red, click it and read the log (the troubleshooting table in step 15 has the usual causes). Every push to `main` that changes the backend repeats this, so the image always matches your code.
+**Check:** the **test** and **image** jobs show a green check mark. (A third job called **deploy** also appears. It only does something after the optional setup in step 14.2, until then it just says it is doing nothing, and that is fine.) If one is red, click it and read the log (the troubleshooting table in step 15 has the usual causes). Every push to `main` that changes the backend repeats this, so the image always matches your code.
 
 ### Replace these placeholders everywhere
 
@@ -507,7 +507,7 @@ Housekeeping you should have done by now: removed the `APP_BOOTSTRAP_*` lines (s
 
 ## 14. Updating later
 
-**New backend version:**
+### 14.1 Update the backend by hand (always works)
 
 1. Push your changes to GitHub.
 2. Open the **Actions** tab and wait for the **Backend** run to turn green. (The new image only exists after the **image** job finished.)
@@ -519,14 +519,114 @@ Housekeeping you should have done by now: removed the `APP_BOOTSTRAP_*` lines (s
 
 That pulls the newest config files and images, restarts what changed and prints the status (about a minute). Database changes (new tables and so on) apply automatically when the backend starts. The same command also picks up small security updates of Postgres 17. Your data stays safe in its Docker volume.
 
-**Something broke after an update? Roll back.** Every build has a tag like `sha-1a2b3c4`. Find the tag of the last good version on GitHub (your profile, **Packages**, **testproject-backend**, the list of versions). Then on the VPS:
+If you set up the automatic deploy in 14.2, you do not need this for normal backend changes. You still need it when you change files inside `deploy/` (for example `compose.yaml`), because the automatic deploy deliberately does not download those.
+
+### 14.2 Update the backend automatically after every push (optional, one-time setup)
+
+Idea: when the **image** job has published a new image, a third job called **deploy** logs in to your server over SSH and tells it to switch to the new image. You see success or failure in the **Actions** tab. Setting it up takes about 15 minutes. Do it only after everything in steps 1 to 13 works.
+
+How it stays safe:
+
+- GitHub gets its **own SSH key**. On the server that key is locked down: it can only start one script (`/usr/local/sbin/deploy-backend`). It cannot open a shell, run other commands or forward ports.
+- That script is owned by `root`, so the `deploy` user (the one the key logs in as) cannot change it, and `deploy` has no other rights.
+- The script only pulls the newest backend image, restarts the backend and checks that it answers. If it does not answer within 90 seconds, the job turns **red**.
+- If the key ever leaks, the worst anyone can do is re-run a deploy of your own published image. You cut it off by deleting one file (see "Switch it off" below).
+- Your server's IP address is stored as a GitHub *secret*, not in the workflow file, because your repository is public and Cloudflare is busy hiding that address.
+
+What it does **not** do: it does not run `git pull` (so changes to files in `deploy/`, nginx files, or new settings in `api.env` stay manual, see 14.1), and it does not roll back by itself. If a new version does not start, the job turns red and you roll back by hand (14.3).
+
+#### A. On the VPS: create the user, the script and the key
+
+```sh
+# 1) a user that exists only to receive the deploy command
+sudo adduser --disabled-password --gecos "" deploy
+
+# 2) the script that does the update (owned by root; the second line tells it where your compose folder is)
+sudo install ~/TestProject/deploy/deploy-backend.sh /usr/local/sbin/deploy-backend
+sudo sed -i "s#^COMPOSE_DIR=.*#COMPOSE_DIR=$HOME/TestProject/deploy#" /usr/local/sbin/deploy-backend
+
+# 3) allow the deploy user to run exactly that one script as root, and nothing else
+echo 'deploy ALL=(root) NOPASSWD: /usr/local/sbin/deploy-backend' > /tmp/deploy-sudoers
+sudo visudo -cf /tmp/deploy-sudoers && sudo install -m 440 /tmp/deploy-sudoers /etc/sudoers.d/deploy-backend
+rm /tmp/deploy-sudoers
+```
+
+**Check:** `visudo` printed `parsed OK`, and `sudo grep '^COMPOSE_DIR=' /usr/local/sbin/deploy-backend` shows a path ending in `/TestProject/deploy` (if you are `root`, it starts with `/root/`).
+
+Now make a key pair and lock the key to that one command:
+
+```sh
+# 4) a new key pair just for GitHub (the empty "" means no passphrase, because GitHub cannot type one)
+ssh-keygen -t ed25519 -N "" -C "github-actions-deploy" -f ~/gh_deploy
+
+# 5) allow that key for the deploy user, restricted to the one command
+sudo install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
+echo "restrict,command=\"sudo /usr/local/sbin/deploy-backend\" $(cat ~/gh_deploy.pub)" | sudo tee /home/deploy/.ssh/authorized_keys > /dev/null
+sudo chown deploy:deploy /home/deploy/.ssh/authorized_keys
+sudo chmod 600 /home/deploy/.ssh/authorized_keys
+```
+
+**Check:** try the key on the server itself, exactly the way GitHub will use it:
+
+```sh
+ssh -T -i ~/gh_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new deploy@127.0.0.1
+```
+
+You should see the deploy steps (`Pulling the newest backend image`, `Restarting the backend`, ...) ending with `Deploy OK`. Whatever command you add after `deploy@127.0.0.1`, only the script runs.
+
+#### B. In GitHub: store three secrets
+
+First show the two values you need. **On the VPS:**
+
+```sh
+cat ~/gh_deploy                                       # the PRIVATE key: everything from -----BEGIN to -----END
+cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub     # the server's identity: one line starting with ssh-ed25519
+```
+
+On github.com open your repository, then **Settings**, **Secrets and variables**, **Actions**, **New repository secret**. Create these three (names exactly as written):
+
+| Name | Value |
+| --- | --- |
+| `DEPLOY_HOST` | your VPS IP address, like `203.0.113.10` |
+| `DEPLOY_SSH_KEY` | the private key from `cat ~/gh_deploy`: copy **all** its lines, including the `-----BEGIN` and `-----END` lines |
+| `DEPLOY_HOST_KEY` | the single line from the `cut` command, starting with `ssh-ed25519` |
+
+`DEPLOY_HOST_KEY` lets GitHub check that it is talking to your real server and not an impostor.
+
+Now delete the private key from the server. GitHub keeps its own copy:
+
+```sh
+rm ~/gh_deploy ~/gh_deploy.pub
+```
+
+Do not paste these values anywhere else (chat, issues, screenshots).
+
+#### C. Test it
+
+On github.com open the **Actions** tab, click the latest **Backend** run and choose **Re-run all jobs** (or just push a backend change).
+
+**Check:** the **deploy** job turns green. Open it: the log shows the same steps as your test, ending with `Deploy OK`. From now on every push to `main` that changes the backend goes: tests, image, server updated.
+
+Until the secrets exist, the **deploy** job just says "The DEPLOY_* secrets are not set" and passes, so pushing before the server is ready is safe.
+
+#### Switch it off, or cut the key off
+
+- **Pause it:** delete the `DEPLOY_HOST` secret in GitHub. The job then skips itself.
+- **Cut the key off completely** (for example if you think it leaked): on the VPS run `sudo rm /home/deploy/.ssh/authorized_keys`. To start again, repeat A4, A5 and B with a new key.
+- **Good to know:** GitHub connects from addresses that change all the time, and the firewall in step 11 allows SSH from anywhere. If you later limit SSH to your own address, the deploy job can no longer connect.
+
+### 14.3 Something broke after an update? Roll back
+
+Every build has a tag like `sha-1a2b3c4`. Find the tag of the last good version on GitHub (your profile, **Packages**, **testproject-backend**, the list of versions). Then on the VPS:
 
 ```sh
 sudo nano /etc/testproject/api.env      # add the line: IMAGE_TAG=sha-1a2b3c4
 cd ~/TestProject/deploy && sudo docker compose up -d
 ```
 
-To go back to always running the newest version, delete that line and run `bash ~/TestProject/deploy/update.sh`.
+To go back to always running the newest version, delete that line and run `bash ~/TestProject/deploy/update.sh`. While the line is there, the automatic deploy from 14.2 also pulls that pinned version, so nothing changes until you delete it.
+
+### 14.4 Everything else
 
 **New frontend version:** just `git push`. Cloudflare rebuilds by itself (watch the build log in the dashboard).
 
@@ -563,6 +663,12 @@ Where to look first (the `docker compose` commands run inside `~/TestProject/dep
 | The server's disk fills up | Old images pile up. `bash ~/TestProject/deploy/update.sh` cleans them each time, or run `sudo docker image prune -f`. Check space with `df -h`. |
 | GitHub Actions: the **test** job is red | A backend test failed. Open the run, read which test. The same tests run on your PC with `cd backend\demo` then `.\gradlew.bat test`. |
 | GitHub Actions: the **image** job fails with a permission or 403 error | On github.com: your repository, **Settings**, **Actions**, **General**, **Workflow permissions**, choose **Read and write permissions**, save, then re-run the job. |
+| GitHub Actions: the **deploy** job says `Permission denied (publickey)` | The server does not accept the key. The `DEPLOY_SSH_KEY` secret must contain **all** lines of the private key (with the `-----BEGIN` and `-----END` lines) and match the public key in `/home/deploy/.ssh/authorized_keys`. That folder must be `700` and the file `600`, both owned by `deploy` (14.2 A, step 5). |
+| GitHub Actions: the **deploy** job says `Host key verification failed` | `DEPLOY_HOST_KEY` is wrong, or the server was reinstalled and has a new identity. Recreate the secret with `cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub` on the VPS. |
+| GitHub Actions: the **deploy** job says `Connection timed out` | `DEPLOY_HOST` is wrong, or SSH is blocked: for example your firewall or provider only allows your own address, but GitHub connects from changing ones. |
+| GitHub Actions: the **deploy** job says `sudo: a password is required` or `not allowed` | The sudoers rule from 14.2 A, step 3 is missing or has a typo. On the VPS, `sudo -l -U deploy` should list `/usr/local/sbin/deploy-backend`. |
+| GitHub Actions: the **deploy** job is red and says `Deploy FAILED` | The new version did not start. The job log shows the most telling error lines. A typical cause is a new setting the backend needs that your `api.env` does not have yet. Fix the cause (14.1 for settings), or roll back (14.3). |
+| GitHub Actions: the **deploy** job passes but says the secrets are not set | That is on purpose until you finish 14.2 B. |
 | Login page says "Could not reach the server" | The website cannot reach the API. Check `VITE_API_URL` (https, no slash at the end, and a new build after changing it), and that `CORS_ALLOWED_ORIGIN` in `api.env` matches the website address exactly. Look at the Network tab. |
 | The website calls `localhost` or the wrong address | `VITE_API_URL` was missing or wrong **at build time**. Set it as a *build* variable and start a new build. |
 | Login seems to work but you are logged out right away | The cookie is not being kept. The website and API must both be on `https` and on the same domain (`app.` and `api.` of the same domain). |
@@ -601,6 +707,10 @@ Where to look first (the `docker compose` commands run inside `~/TestProject/dep
 - **Docker Compose**: starts and connects several containers from one file (`compose.yaml`).
 - **Volume**: a folder Docker keeps outside the container, so the database survives when the container is replaced.
 - **GitHub Actions**: GitHub's built-in robot that runs tests and builds the image whenever you push.
+- **SSH key**: a pair of files used instead of a password. The private half stays secret, the public half goes on the server.
+- **GitHub secret**: a value stored in your repository settings that workflows can use, but nobody can read back.
+- **Restricted key**: an SSH key set up on the server so that it can run one fixed command and nothing else.
+- **sudoers**: Linux's list of who may run which commands as the admin.
 - **Workers Builds**: Cloudflare's feature that builds and publishes your website from GitHub on every push.
 - **DNS record**: an entry that says "this name points to this IP address".
 - **Proxy (orange cloud)**: traffic goes through Cloudflare first, which hides your server's address.

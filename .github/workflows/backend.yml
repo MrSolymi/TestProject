@@ -18,7 +18,9 @@ permissions:
 
 concurrency:
   group: backend-${{ github.ref }}
-  cancel-in-progress: true
+  # Only pull request runs may be cancelled by a newer one. A run on main must never be cancelled
+  # halfway, because it might be in the middle of updating the server.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -70,3 +72,36 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Tells the VPS to start using the image that was just published. It logs in over SSH with a key that can
+  # only run /usr/local/sbin/deploy-backend (set up in DEPLOY.md, step 14.2). Until the three DEPLOY_*
+  # secrets exist this job does nothing, so pushing before the server is ready is fine.
+  deploy:
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - id: cfg
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -n "$DEPLOY_HOST" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "The DEPLOY_* secrets are not set, so the server is not updated automatically."
+          fi
+      - if: steps.cfg.outputs.enabled == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_HOST_KEY: ${{ secrets.DEPLOY_HOST_KEY }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pin the server's identity so nobody can pose as it.
+          printf '%s %s\n' "$DEPLOY_HOST" "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
+          # The key on the server is restricted: whatever command we send, it only runs deploy-backend.
+          ssh -T -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 "deploy@$DEPLOY_HOST"

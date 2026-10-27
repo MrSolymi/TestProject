@@ -5,7 +5,7 @@ Basic invite-only auth monorepo.
 - `backend/demo` – Spring Boot 4, Postgres, Flyway, JWT in an HttpOnly cookie
 - `frontend` – SvelteKit static SPA (pnpm, Tailwind, shadcn-svelte)
 - `deploy` – production Docker Compose file, nginx and firewall helpers for the VPS (see [DEPLOY.md](DEPLOY.md))
-- `.github/workflows` – CI: runs the backend tests and publishes the backend Docker image to GitHub's registry
+- `.github/workflows` – CI: runs the backend tests, publishes the backend Docker image to GitHub's registry and, once set up (DEPLOY.md step 14.2), tells the VPS to start using it
 
 Registering needs a single-use invite token created by an existing user (the "Create invite link"
 button on the home page). The first user is seeded from `APP_BOOTSTRAP_USERNAME` /
