@@ -8,7 +8,7 @@
 	"workers_dev": false,
 	"routes": [
 		// CHANGE THIS to your real address. The domain must already be added to your Cloudflare account.
-		{ "pattern": "app.example.com", "custom_domain": true }
+		{ "pattern": "testapp.mrsolymi.me", "custom_domain": true }
 	],
 	"assets": {
 		"directory": "./build",
