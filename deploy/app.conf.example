@@ -1,0 +1,14 @@
+# Settings for one app, used by /usr/local/sbin/deploy-app (see DEPLOY.md, step 14.2).
+# On the VPS this lives at /etc/deploy/<app-name>.conf. It is plain shell and is run by root,
+# so keep it owned by root and writable by nobody else.
+
+# The folder that contains this app's compose.yaml.
+COMPOSE_DIR=/CHANGE/ME
+
+# The compose service to update (for this project: api).
+SERVICE=api
+
+# An address on the VPS that proves the app is running, and the HTTP status it answers with.
+# 401 = the API is running, it just says "you are not logged in".
+HEALTH_URL=http://127.0.0.1:8080/api/auth/me
+HEALTH_CODE=401
