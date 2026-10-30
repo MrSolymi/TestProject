@@ -93,6 +93,8 @@ Now watch GitHub build the image. Open your repository on github.com and click t
 
 The website will be `https://app.yourdomain.com` and the API will be `https://api.yourdomain.com`.
 
+You can pick other names than `app` and `api` (for example `testapp` and `testapi`). That is fine, as long as both are under the **same domain** and you use the **same two names everywhere**: the DNS record (8.1), the nginx `server_name` (step 9), `CORS_ALLOWED_ORIGIN` (step 7), `wrangler.jsonc` and `VITE_API_URL` (step 12).
+
 ### Two kinds of terminals
 
 Every command block below says where to run it:
@@ -301,6 +303,8 @@ Save. The orange cloud is important: it makes traffic go through Cloudflare, whi
 
 **SSL/TLS → Overview.** Set the encryption mode to **Full (strict)**. (If you only see a "Configure" button, open it and pick Full (strict).) This makes Cloudflare insist on a valid certificate on your server.
 
+While you are in the SSL/TLS settings, also turn on **Always Use HTTPS** (**SSL/TLS → Edge Certificates → Always Use HTTPS → On**). Without it, anyone who opens the plain `http://` version of your website gets it over an unencrypted connection, where it cannot talk to the API and shows an error page. This happens more often than you would think: chat apps like Messenger turn a bare `app.yourdomain.com` into an `http://` link, and browsers can autocomplete to an old `http://` address. With the switch on, every `http://` address jumps to `https://`. It applies to your whole domain.
+
 ### 8.3 A certificate for your server
 
 **SSL/TLS → Origin Server → Create Certificate.** Keep the defaults (Cloudflare generates the key, RSA, 15 years). The hostnames list should include `api.yourdomain.com` (the default `*.yourdomain.com` also covers it). Click **Create**.
@@ -464,26 +468,42 @@ git commit -m "Set my domain"
 git push
 ```
 
+**Why does this file exist?** The deploy command (`npx wrangler deploy`) reads `frontend/wrangler.jsonc` to learn what to publish. Without it, Cloudflare would not know where your built website is. The important lines:
+
+- `name`: the project name. It must be the same as the *Project name* you type in 12.2.
+- `assets.directory`: the folder with the finished website (`./build`, which `pnpm build` creates).
+- `assets.not_found_handling`: `single-page-application` makes addresses like `/login` open your app, even when someone refreshes the page.
+- `routes`: puts the site on your own address. `custom_domain: true` means Cloudflare creates the DNS record for you, so do not create one by hand for this name. (If the deploy complains that a DNS record already exists, delete that record in the DNS tab and deploy again.)
+- `workers_dev: false`: switches off the free `*.workers.dev` address, because login cookies would not work there.
+
 ### 12.2 Connect the repository in Cloudflare
 
-In the Cloudflare dashboard open **Workers & Pages**, then **Create** and choose to **import a repository** (connect to Git). Log in to GitHub when asked and allow Cloudflare access to the `TestProject` repository. Then fill in these settings (the page may word them slightly differently):
+In the Cloudflare dashboard open **Workers & Pages**, then **Create** and choose to **import a repository** (connect to Git). Log in to GitHub when asked and allow Cloudflare access to the `TestProject` repository. You then see a form called **Set up your application**. Fill it in like this (Cloudflare changes the wording now and then, so match by meaning):
 
-| Setting | Value |
+| Field | What to put |
 | --- | --- |
-| Project / Worker name | `testproject-frontend` (it **must** match `name` in `frontend/wrangler.jsonc`) |
-| Production branch | `main` |
-| **Root directory** | `frontend` (your repo has the backend and frontend side by side, this tells Cloudflare which part to build) |
-| **Build command** | `pnpm build` |
-| **Deploy command** | `npx wrangler deploy` (usually already the default) |
-| **Build variables and secrets** | add `VITE_API_URL` = `https://api.yourdomain.com` (no slash at the end) |
+| **Project name** | `testproject-frontend` (it **must** match `name` in `frontend/wrangler.jsonc`) |
+| **Build command** | **`pnpm build`**. The box starts **empty**. If you leave it empty, nothing gets built and the deploy fails, because the `build` folder does not exist. |
+| **Deploy command** | `npx wrangler deploy` (already filled in, leave it) |
+| **Preview command** and **Enable Preview builds** | Leave the command alone and switch **Enable Preview builds** **off** for now, so that only `main` deploys, like the rest of this guide. |
+| **Protect with Cloudflare Access** | Keep it **off**, otherwise every visitor would need a Cloudflare login. |
+| **Advanced settings, Path** | **`frontend`**. This is the folder inside your repository that Cloudflare works in (its docs call it the *root directory*). It starts as `/`, which is the whole repository, where it would not find the website. Hover the **i** next to it to see this. |
+| **API token** | Leave it on **Create new token**. Cloudflare makes a token that lets its build robot publish your site. |
+| **Variable name** and **Variable value** | `VITE_API_URL` and your API address, for example `https://testapi.yourdomain.com` (no slash at the end). Use the real name you gave the API in steps 8.1 and 9. Do **not** click Encrypt, it is not a secret. |
 
-About that last one: `VITE_API_URL` tells the website where the API is. It is baked into the website when it is built, so it must be set as a **build** variable (not a runtime one). If you change it later, you must start a new build.
+About that last one: `VITE_API_URL` tells the website where the API is. It is baked into the website when it is built, so it must be a **build** variable (not a runtime one). If you change it later, you must start a new build.
 
 Cloudflare's build machine already has a recent Node (24) and pnpm, which fits this project. If you ever want to pin it, add the build variable `NODE_VERSION` = `24`.
 
 Save and deploy.
 
-**Check:** open the build log in Cloudflare. You should see it install the packages, run the build, and end with a successful deploy. Then open `https://app.yourdomain.com`: you should see the login page.
+**Check:** open the build log in Cloudflare. You should see it install the packages, run the build, and end with a successful deploy. Then open `https://app.yourdomain.com`: you should see the login page. Also check that the plain `http` address jumps to `https`:
+
+```powershell
+curl.exe -I http://app.yourdomain.com
+```
+
+It should answer `301` or `308` with a `Location: https://...` line. If it says `200 OK`, go back to the **Always Use HTTPS** switch in step 8.2.
 
 From now on, **`git push` is your frontend deploy**.
 
@@ -671,6 +691,7 @@ Where to look first (the `docker compose` commands run inside `~/TestProject/dep
 | GitHub Actions: the **deploy** job passes but says the secrets are not set | That is on purpose until you finish 14.2 B. |
 | Login page says "Could not reach the server" | The website cannot reach the API. Check `VITE_API_URL` (https, no slash at the end, and a new build after changing it), and that `CORS_ALLOWED_ORIGIN` in `api.env` matches the website address exactly. Look at the Network tab. |
 | The website calls `localhost` or the wrong address | `VITE_API_URL` was missing or wrong **at build time**. Set it as a *build* variable and start a new build. |
+| The website works with `https://` but shows an error page when opened without it (for example from a link in Messenger) | The page loaded over plain `http`, and the backend only accepts the `https` address of the website, so every request to the API is refused. Turn on **Always Use HTTPS** in Cloudflare (step 8.2). |
 | Login seems to work but you are logged out right away | The cookie is not being kept. The website and API must both be on `https` and on the same domain (`app.` and `api.` of the same domain). |
 | You cannot log in as the first user | It is only created when the database is empty. See the "Gotcha" box in step 7. |
 | Cloudflare build: the name does not match | The Worker name in the dashboard must be exactly `testproject-frontend`, the same as `name` in `frontend/wrangler.jsonc`. |
