@@ -74,7 +74,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   # Tells the VPS to start using the image that was just published. It logs in over SSH with a key that can
-  # only run /usr/local/sbin/deploy-backend (set up in DEPLOY.md, step 14.2). Until the three DEPLOY_*
+  # only run `/usr/local/sbin/deploy-app <this app's name>` (set up in DEPLOY.md, step 14.2). Until the three DEPLOY_*
   # secrets exist this job does nothing, so pushing before the server is ready is fine.
   deploy:
     needs: image
@@ -102,6 +102,6 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           # Pin the server's identity so nobody can pose as it.
           printf '%s %s\n' "$DEPLOY_HOST" "$DEPLOY_HOST_KEY" > ~/.ssh/known_hosts
-          # The key on the server is restricted: whatever command we send, it only runs deploy-backend.
+          # The key on the server is restricted: whatever command we send, it only runs deploy-app for this one app.
           ssh -T -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o ConnectTimeout=20 "deploy@$DEPLOY_HOST"

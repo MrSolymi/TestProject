@@ -547,41 +547,56 @@ Idea: when the **image** job has published a new image, a third job called **dep
 
 How it stays safe:
 
-- GitHub gets its **own SSH key**. On the server that key is locked down: it can only start one script (`/usr/local/sbin/deploy-backend`). It cannot open a shell, run other commands or forward ports.
-- That script is owned by `root`, so the `deploy` user (the one the key logs in as) cannot change it, and `deploy` has no other rights.
-- The script only pulls the newest backend image, restarts the backend and checks that it answers. If it does not answer within 90 seconds, the job turns **red**.
+- GitHub gets its **own SSH key**. On the server that key is locked down: it can only start one command (`/usr/local/sbin/deploy-app testproject`). It cannot open a shell, run other commands or forward ports.
+- That script is owned by `root`, so the `deploy` user (the one the key logs in as) cannot change it, and `deploy` has no other rights. The sudo rule allows exactly `deploy-app testproject`, not the script with other names.
+- The script only pulls the newest image of the app, restarts it and checks that it answers. If it does not answer within 90 seconds, the job turns **red**.
+- The script is **shared by all your apps**. Each app has its own small settings file in `/etc/deploy/` and its own key, so a leaked key can only redeploy that one app. (Adding a second backend later: see "Adding another app" below.)
 - If the key ever leaks, the worst anyone can do is re-run a deploy of your own published image. You cut it off by deleting one file (see "Switch it off" below).
 - Your server's IP address is stored as a GitHub *secret*, not in the workflow file, because your repository is public and Cloudflare is busy hiding that address.
 
 What it does **not** do: it does not run `git pull` (so changes to files in `deploy/`, nginx files, or new settings in `api.env` stay manual, see 14.1), and it does not roll back by itself. If a new version does not start, the job turns red and you roll back by hand (14.3).
 
-#### A. On the VPS: create the user, the script and the key
+#### A. On the VPS: create the user, the script, the app settings and the key
+
+Pull the newest files first, so the VPS has `deploy-app.sh` and `app.conf.example`:
 
 ```sh
-# 1) a user that exists only to receive the deploy command
-sudo adduser --disabled-password --gecos "" deploy
+cd ~/TestProject && git pull
+```
 
-# 2) the script that does the update (owned by root; the second line tells it where your compose folder is)
-sudo install ~/TestProject/deploy/deploy-backend.sh /usr/local/sbin/deploy-backend
-sudo sed -i "s#^COMPOSE_DIR=.*#COMPOSE_DIR=$HOME/TestProject/deploy#" /usr/local/sbin/deploy-backend
+Then:
 
-# 3) allow the deploy user to run exactly that one script as root, and nothing else
-echo 'deploy ALL=(root) NOPASSWD: /usr/local/sbin/deploy-backend' > /tmp/deploy-sudoers
-sudo visudo -cf /tmp/deploy-sudoers && sudo install -m 440 /tmp/deploy-sudoers /etc/sudoers.d/deploy-backend
+```sh
+# 1) a user that exists only to receive the deploy command (skip if it already exists)
+id deploy >/dev/null 2>&1 || sudo adduser --disabled-password --gecos "" deploy
+
+# 2) the shared script that does the update (owned by root)
+sudo install ~/TestProject/deploy/deploy-app.sh /usr/local/sbin/deploy-app
+
+# 3) the settings of THIS app: copy the example, then tell it where your compose folder is
+sudo install -d -m 755 /etc/deploy
+sudo install -m 644 ~/TestProject/deploy/app.conf.example /etc/deploy/testproject.conf
+sudo sed -i "s#^COMPOSE_DIR=.*#COMPOSE_DIR=$HOME/TestProject/deploy#" /etc/deploy/testproject.conf
+
+# 4) allow the deploy user to run exactly this one command as root, and nothing else
+echo 'deploy ALL=(root) NOPASSWD: /usr/local/sbin/deploy-app testproject' > /tmp/deploy-sudoers
+sudo visudo -cf /tmp/deploy-sudoers && sudo install -m 440 /tmp/deploy-sudoers /etc/sudoers.d/deploy-testproject
 rm /tmp/deploy-sudoers
 ```
 
-**Check:** `visudo` printed `parsed OK`, and `sudo grep '^COMPOSE_DIR=' /usr/local/sbin/deploy-backend` shows a path ending in `/TestProject/deploy` (if you are `root`, it starts with `/root/`).
+`testproject` is the **app name**. It is part of the settings file name, the sudo rule and the key below, so use the same name everywhere (lowercase letters, digits and dashes only).
+
+**Check:** `visudo` printed `parsed OK`, and `sudo grep '^COMPOSE_DIR=' /etc/deploy/testproject.conf` shows a path ending in `/TestProject/deploy` (if you are `root`, it starts with `/root/`). The other settings in that file (`SERVICE`, `HEALTH_URL`, `HEALTH_CODE`) already match this project.
 
 Now make a key pair and lock the key to that one command:
 
 ```sh
-# 4) a new key pair just for GitHub (the empty "" means no passphrase, because GitHub cannot type one)
-ssh-keygen -t ed25519 -N "" -C "github-actions-deploy" -f ~/gh_deploy
+# 5) a new key pair just for GitHub (the empty "" means no passphrase, because GitHub cannot type one)
+ssh-keygen -t ed25519 -N "" -C "github-actions-deploy-testproject" -f ~/gh_deploy_testproject
 
-# 5) allow that key for the deploy user, restricted to the one command
+# 6) allow that key for the deploy user, restricted to the one command (tee -a ADDS a line: other apps' keys stay)
 sudo install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
-echo "restrict,command=\"sudo /usr/local/sbin/deploy-backend\" $(cat ~/gh_deploy.pub)" | sudo tee /home/deploy/.ssh/authorized_keys > /dev/null
+echo "restrict,command=\"sudo /usr/local/sbin/deploy-app testproject\" $(cat ~/gh_deploy_testproject.pub)" | sudo tee -a /home/deploy/.ssh/authorized_keys > /dev/null
 sudo chown deploy:deploy /home/deploy/.ssh/authorized_keys
 sudo chmod 600 /home/deploy/.ssh/authorized_keys
 ```
@@ -589,17 +604,17 @@ sudo chmod 600 /home/deploy/.ssh/authorized_keys
 **Check:** try the key on the server itself, exactly the way GitHub will use it:
 
 ```sh
-ssh -T -i ~/gh_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new deploy@127.0.0.1
+ssh -T -i ~/gh_deploy_testproject -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new deploy@127.0.0.1
 ```
 
-You should see the deploy steps (`Pulling the newest backend image`, `Restarting the backend`, ...) ending with `Deploy OK`. Whatever command you add after `deploy@127.0.0.1`, only the script runs.
+You should see the deploy steps (`[testproject] Pulling the newest image`, `Restarting api`, ...) ending with `Deploy OK`. Whatever command you add after `deploy@127.0.0.1`, only the script runs.
 
 #### B. In GitHub: store three secrets
 
 First show the two values you need. **On the VPS:**
 
 ```sh
-cat ~/gh_deploy                                       # the PRIVATE key: everything from -----BEGIN to -----END
+cat ~/gh_deploy_testproject                           # the PRIVATE key: everything from -----BEGIN to -----END
 cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub     # the server's identity: one line starting with ssh-ed25519
 ```
 
@@ -608,7 +623,7 @@ On github.com open your repository, then **Settings**, **Secrets and variables**
 | Name | Value |
 | --- | --- |
 | `DEPLOY_HOST` | your VPS IP address, like `203.0.113.10` |
-| `DEPLOY_SSH_KEY` | the private key from `cat ~/gh_deploy`: copy **all** its lines, including the `-----BEGIN` and `-----END` lines |
+| `DEPLOY_SSH_KEY` | the private key from `cat ~/gh_deploy_testproject`: copy **all** its lines, including the `-----BEGIN` and `-----END` lines |
 | `DEPLOY_HOST_KEY` | the single line from the `cut` command, starting with `ssh-ed25519` |
 
 `DEPLOY_HOST_KEY` lets GitHub check that it is talking to your real server and not an impostor.
@@ -616,7 +631,7 @@ On github.com open your repository, then **Settings**, **Secrets and variables**
 Now delete the private key from the server. GitHub keeps its own copy:
 
 ```sh
-rm ~/gh_deploy ~/gh_deploy.pub
+rm ~/gh_deploy_testproject ~/gh_deploy_testproject.pub
 ```
 
 Do not paste these values anywhere else (chat, issues, screenshots).
@@ -632,8 +647,18 @@ Until the secrets exist, the **deploy** job just says "The DEPLOY_* secrets are 
 #### Switch it off, or cut the key off
 
 - **Pause it:** delete the `DEPLOY_HOST` secret in GitHub. The job then skips itself.
-- **Cut the key off completely** (for example if you think it leaked): on the VPS run `sudo rm /home/deploy/.ssh/authorized_keys`. To start again, repeat A4, A5 and B with a new key.
+- **Cut the key off completely** (for example if you think it leaked): on the VPS delete that app's line from `/home/deploy/.ssh/authorized_keys` (`sudo nano /home/deploy/.ssh/authorized_keys`, one line per app, the line ends with the key comment like `github-actions-deploy-testproject`). With only one app you can also run `sudo rm /home/deploy/.ssh/authorized_keys`. To start again, repeat A5, A6 and B with a new key.
 - **Good to know:** GitHub connects from addresses that change all the time, and the firewall in step 11 allows SSH from anywhere. If you later limit SSH to your own address, the deploy job can no longer connect.
+
+#### Adding another app later
+
+Each extra backend on the same VPS reuses the same `deploy-app` script and the same `deploy` user. For an app called `otherapp`, repeat only these parts of A and B, with the new name everywhere:
+
+- **A3:** a new settings file `/etc/deploy/otherapp.conf`, with its own `COMPOSE_DIR` and its **own port** in `HEALTH_URL` (two apps cannot both use `127.0.0.1:8080`).
+- **A4:** a new sudo rule `deploy ALL=(root) NOPASSWD: /usr/local/sbin/deploy-app otherapp`, in its own file `/etc/sudoers.d/deploy-otherapp`.
+- **A5, A6 and B:** a new key pair (`~/gh_deploy_otherapp`), a new line in `authorized_keys` with `deploy-app otherapp`, and the three secrets in **that app's** GitHub repository.
+
+Also give each app a different compose project name (`name:` at the top of its `compose.yaml`, or its own folder name), or the containers and volumes of the two apps will collide. The same goes for its nginx `server_name` and its own `api.env`.
 
 ### 14.3 Something broke after an update? Roll back
 
